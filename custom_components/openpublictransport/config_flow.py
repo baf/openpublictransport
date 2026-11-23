@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import re
+from collections import Counter
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional
@@ -39,6 +41,8 @@ from openpublictransport import (
     get_provider,
     get_provider_class,
 )
+from openpublictransport.providers.cta import decode_stop_id as cta_decode_stop_id
+from openpublictransport.providers.cta import encode_stop_id as cta_encode_stop_id
 
 from .const import (
     CONF_API_KEY,
@@ -78,6 +82,7 @@ from .const import (
     DEFAULT_WALKING_TIME,
     DOMAIN,
     GENERIC_API_KEY_PROVIDERS,
+    PROVIDER_CTA_US,
     PROVIDER_HVV,
     PROVIDER_HVV_GTI,
     PROVIDER_KVV,
@@ -126,6 +131,64 @@ def _is_valid_hhmm(value: str) -> bool:
         return 0 <= int(hour) <= 23 and 0 <= int(minute) <= 59
     except (ValueError, AttributeError):
         return False
+
+
+# A CTA stop id as printed on the stop sign / in CTA's apps: 1–5 digits,
+# optionally in the integration's own "bus:<id>" / "train:<id>" form.
+_CTA_STOP_ID_RE = re.compile(r"^(?:(bus|train)\s*:\s*)?#?\s*(\d{1,5})$", re.IGNORECASE)
+
+
+def _cta_stop_from_id(search_term: str) -> Optional[Dict[str, Any]]:
+    """Return a stop for a search term that is a CTA stop id, else None.
+
+    CTA gives the same name to the stops on both sides of a street (#118), so a
+    name search cannot always reach the stop the user wants, and the geocoder
+    behind it does not index stop ids. Accepting the id directly gives every
+    stop a unique way in.
+    """
+    match = _CTA_STOP_ID_RE.match(search_term.strip())
+    if not match:
+        return None
+    kind, number = match.groups()
+    number = str(int(number))  # "03794" -> "3794", as CTA's APIs expect
+    if number == "0":
+        return None
+    station_id = f"{kind.lower()}:{number}" if kind else cta_encode_stop_id(number)
+    kind = station_id.partition(":")[0]
+    return {
+        "id": station_id,
+        "name": f"{'Bus stop' if kind == 'bus' else 'L station'} {number}",
+        "place": "Chicago",
+        "area_type": "stop",
+        "transport_modes": ["bus" if kind == "bus" else "subway"],
+    }
+
+
+def _display_stop_id(provider: Optional[str], stop_id: str) -> str:
+    """Return a stop id the way users know it (CTA: the bare number on the sign)."""
+    if provider == PROVIDER_CTA_US:
+        return cta_decode_stop_id(stop_id)[1]
+    return stop_id
+
+
+def _stop_dropdown_options(stops: List[Any], provider: Optional[str]) -> Dict[str, str]:
+    """Build the stop dropdown: "Name, Place", with the stop id added to tell same-named stops apart."""
+    labels: Dict[str, str] = {}
+    for stop in stops:
+        if isinstance(stop, dict) and "id" in stop and "name" in stop:
+            name = stop["name"]
+            place = stop.get("place", "")
+            labels[stop["id"]] = f"{name}, {place}" if place and place not in name else name
+
+    # Stops that share a label (e.g. CTA's stops on either side of a street,
+    # #118) would be indistinguishable in the dropdown.
+    counts = Counter(labels.values())
+    options = {"__search_again__": "🔍 Neue Suche / New search..."}
+    for stop_id, label in labels.items():
+        if counts[label] > 1:
+            label = f"{label} (ID {_display_stop_id(provider, str(stop_id))})"
+        options[stop_id] = label
+    return options
 
 
 # Alphabetically sorted provider dropdown entries ("SHORT — Region").
@@ -838,15 +901,7 @@ class OpenPublicTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  
             return await self.async_step_stop_search()
 
         # Build dropdown: "Haltestellenname, Ort" format
-        stop_options = {"__search_again__": "🔍 Neue Suche / New search..."}
-        for stop in stops:
-            if isinstance(stop, dict) and "id" in stop and "name" in stop:
-                name = stop["name"]
-                place = stop.get("place", "")
-                if place and place not in name:
-                    stop_options[stop["id"]] = f"{name}, {place}"
-                else:
-                    stop_options[stop["id"]] = name
+        stop_options = _stop_dropdown_options(stops, self._provider)
 
         schema = vol.Schema(
             {
@@ -1108,6 +1163,12 @@ class OpenPublicTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  
         Returns:
             List of stop dictionaries
         """
+        # CTA stop ids are not searchable by name, so answer them directly (#118).
+        if self._provider == PROVIDER_CTA_US:
+            id_stop = _cta_stop_from_id(search_term)
+            if id_stop is not None:
+                return [id_stop]
+
         # Check cache first
         cache_key = self._get_cache_key(self._provider, search_term, "stop")
         cached_results = self._get_from_cache(cache_key)
@@ -1810,15 +1871,7 @@ class OpenPublicTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):  
                 return await self.async_step_trip_via()
             return await self.async_step_trip_search()
 
-        stop_options = {"__search_again__": "🔍 Neue Suche / New search..."}
-        for stop in stops:
-            if isinstance(stop, dict) and "id" in stop and "name" in stop:
-                name = stop["name"]
-                place = stop.get("place", "")
-                if place and place not in name:
-                    stop_options[stop["id"]] = f"{name}, {place}"
-                else:
-                    stop_options[stop["id"]] = name
+        stop_options = _stop_dropdown_options(stops, self._provider)
 
         schema = vol.Schema({vol.Required("stop"): vol.In(stop_options)})
         search_term = getattr(self, "_last_search_term", "")

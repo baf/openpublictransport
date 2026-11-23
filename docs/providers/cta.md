@@ -37,6 +37,17 @@ Enter the Bus Tracker key in the first field and the Train Tracker key in the se
 
 Stop search works without a key and finds both 'L' stations and bus stops.
 
+### Searching by stop ID
+
+CTA often gives the same name to several stops, for example the stops on both sides of a street
+("Lawrence & Western"). When a search finds stops with the same name, the list shows each stop's
+ID next to it, e.g. *Lawrence & Western, Chicago (ID 3794)*.
+
+You can also enter a stop ID directly instead of a name, e.g. `3794`. Bus stop IDs are printed on
+the stop sign and shown in CTA's Bus Tracker; IDs from 30000 to 49999 are 'L' platforms and
+stations (e.g. `40380` for Clark/Lake). A stop entered by ID is named after its ID
+(e.g. "Bus stop 3794"); you can rename the entity in Home Assistant.
+
 ### Example Stops
 
 - Clark/Lake
